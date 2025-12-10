@@ -28,10 +28,24 @@ def insert_plate(plate_number, camera_location="Gate 1"):
     conn.commit()
     conn.close()
 
-def get_all_logs():
+def get_all_logs(limit=10):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM vehicle_log")
+    cursor.execute("""
+        SELECT id, plate_number, date_time, camera_location
+        FROM vehicle_log
+        ORDER BY id DESC
+        LIMIT ?
+    """, (limit,))
     rows = cursor.fetchall()
     conn.close()
     return rows
+
+def delete_log(row_id):
+    """Delete a single log entry by id."""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM vehicle_log WHERE id = ?", (row_id,))
+    conn.commit()
+    conn.close()
+

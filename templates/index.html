@@ -1,76 +1,257 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
+    <meta charset="UTF-8" />
     <title>Number Plate Recognition</title>
     <style>
+        :root {
+            --primary: #2563eb;
+            --bg: #f3f4f6;
+            --card-bg: #ffffff;
+            --border: #e5e7eb;
+            --success: #16a34a;
+            --error: #dc2626;
+        }
+        * {
+            box-sizing: border-box;
+        }
         body {
-            font-family: Arial, sans-serif;
-            margin: 40px;
-            background: #f5f5f5;
+            margin: 0;
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background: radial-gradient(circle at top left, #e0ecff, #f3f4f6);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 24px 12px;
         }
         .container {
-            max-width: 600px;
-            margin: auto;
-            background: #ffffff;
-            padding: 20px 30px;
-            border-radius: 8px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            width: 100%;
+            max-width: 780px;
+            background: var(--card-bg);
+            border-radius: 16px;
+            padding: 24px 24px 28px;
+            box-shadow: 0 18px 40px rgba(15, 23, 42, 0.18);
+            border: 1px solid rgba(148, 163, 184, 0.35);
         }
         h1 {
+            margin: 0;
+            font-size: 1.6rem;
+            text-align: center;
+            letter-spacing: 0.04em;
+        }
+        .subtitle {
+            margin-top: 4px;
+            font-size: 0.85rem;
+            color: #6b7280;
             text-align: center;
         }
-        .upload-section {
-            margin-top: 20px;
+        form {
+            margin-top: 18px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 10px;
         }
-        .result {
-            margin-top: 20px;
-            padding: 12px;
-            border-radius: 6px;
-            background: #e8f4ff;
-            border: 1px solid #b3daff;
-        }
-        .error {
-            margin-top: 20px;
-            padding: 12px;
-            border-radius: 6px;
-            background: #ffe8e8;
-            border: 1px solid #ffb3b3;
+        input[type="file"] {
+            font-size: 0.85rem;
         }
         button {
-            padding: 8px 16px;
+            padding: 8px 18px;
+            border-radius: 999px;
             border: none;
-            background: #007bff;
+            background: var(--primary);
             color: white;
-            border-radius: 4px;
+            font-size: 0.9rem;
             cursor: pointer;
         }
         button:hover {
-            background: #0056b3;
+            background: #1d4ed8;
         }
-        input[type="file"] {
-            margin-top: 8px;
+        .message {
+            margin-top: 10px;
+            padding: 8px 12px;
+            border-radius: 8px;
+            font-size: 0.85rem;
+            text-align: center;
+        }
+        .message-success {
+            background: #ecfdf3;
+            color: #166534;
+            border: 1px solid #bbf7d0;
+        }
+        .message-error {
+            background: #fef2f2;
+            color: #b91c1c;
+            border: 1px solid #fecaca;
+        }
+        .result-card {
+            margin-top: 18px;
+            padding: 14px 16px 16px;
+            border-radius: 12px;
+            border: 1px solid var(--border);
+            background: #f9fafb;
+        }
+        .result-title {
+            font-size: 0.9rem;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+        .img-wrapper {
+            width: 100%;
+            max-height: 260px;
+            overflow: hidden;
+            border-radius: 10px;
+            border: 1px solid #e5e7eb;
+            background: #111827;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .img-wrapper img {
+            width: 100%;
+            height: auto;
+            display: block;
+            object-fit: contain;
+        }
+        .plate-text {
+            margin-top: 12px;
+            padding: 10px 12px;
+            border-radius: 8px;
+            background: #eff6ff;
+            border: 1px dashed #93c5fd;
+            font-family: "SF Mono", ui-monospace, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+            font-size: 0.95rem;
+            text-align: center;
+        }
+        .plate-text-label {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: #6b7280;
+            margin-bottom: 2px;
+        }
+        .hint {
+            margin-top: 10px;
+            font-size: 0.75rem;
+            color: #9ca3af;
+            text-align: center;
+        }
+
+        /* History table styles */
+        .history-card {
+            margin-top: 20px;
+            padding: 14px 16px 16px;
+            border-radius: 12px;
+            border: 1px solid var(--border);
+            background: #f9fafb;
+        }
+        .history-title {
+            font-size: 0.9rem;
+            font-weight: 600;
+            margin-bottom: 6px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.8rem;
+            margin-top: 6px;
+        }
+        th, td {
+            padding: 6px 8px;
+            border-bottom: 1px solid #e5e7eb;
+            text-align: left;
+        }
+        th {
+            background: #e5edff;
+            font-weight: 600;
+        }
+        tr:last-child td {
+            border-bottom: none;
+        }
+        .history-empty {
+            font-size: 0.8rem;
+            color: #9ca3af;
+            margin-top: 4px;
         }
     </style>
 </head>
 <body>
 <div class="container">
-    <h1>Automatic Number Plate Recognition</h1>
+    <h1>Number Plate Recognition</h1>
+    <div class="subtitle">
+        Upload a vehicle image. The cropped plate and detected number will appear below.
+    </div>
 
-    <form method="POST" enctype="multipart/form-data" class="upload-section">
-        <label for="plate_image">Upload number plate image:</label><br>
-        <input type="file" name="plate_image" id="plate_image" accept="image/*" required><br><br>
+    <form method="POST" enctype="multipart/form-data">
+        <input type="file" name="plate_image" accept="image/*" required />
         <button type="submit">Detect Plate</button>
     </form>
 
     {% if message %}
-        <div class="{% if detected_text %}result{% else %}error{% endif %}">
-            <strong>{{ message }}</strong><br>
-            {% if detected_text %}
-                Detected Plate Number: <strong>{{ detected_text }}</strong>
-            {% endif %}
+        <div class="message {% if detected_text %}message-success{% else %}message-error{% endif %}">
+            {{ message }}
         </div>
     {% endif %}
+
+    {% if plate_image_url %}
+        <div class="result-card">
+            <div class="result-title">Cropped Plate Region</div>
+            <div class="img-wrapper">
+                <img src="{{ plate_image_url }}" alt="Cropped plate image" />
+            </div>
+
+            {% if detected_text %}
+            <form method="POST" action="{{ url_for('confirm_plate') }}">
+                <div style="margin-top:12px;">
+                    <label class="plate-text-label">Detected Plate Number (edit if needed)</label>
+                    <input type="text" name="confirmed_text" value="{{ detected_text }}" 
+                        style="width:100%; padding:8px; font-family:monospace; font-size:1rem; margin-top:6px; border-radius:6px; border:1px solid #cbd5e1;">
+                    <input type="hidden" name="source" value="Web Upload">
+                    <div style="margin-top:8px; display:flex; gap:8px;">
+                        <button type="submit" style="background:#16a34a;color:white;padding:8px 12px;border:none;border-radius:8px;cursor:pointer;">Confirm & Save</button>
+                        <a href="{{ url_for('index') }}" style="display:inline-block;padding:8px 12px;border-radius:8px;border:1px solid #e5e7eb;text-decoration:none;color:#374151;">Cancel</a>
+                    </div>
+                </div>
+            </form>
+        {% endif %}
+        </div>
+    {% else %}
+        <div class="hint">
+            After you upload an image, the cropped plate and detected number will appear here.
+        </div>
+    {% endif %}
+
+    <div class="history-card">
+        <div class="history-title">Recent Detection History</div>
+
+        {% if history and history|length > 0 %}
+            <table>
+                <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Plate Number</th>
+                    <th>Date &amp; Time</th>
+                    <th>Source</th>
+                </tr>
+                </thead>
+                <tbody>
+                {% for row in history %}
+                    <tr>
+                        <td>{{ row[0] }}</td>
+                        <td>{{ row[1] }}</td>
+                        <td>{{ row[2] }}</td>
+                        <td>{{ row[3] or 'Web Upload' }}</td>
+                    </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        {% else %}
+            <div class="history-empty">
+                No detections logged yet. Upload an image to see history here.
+            </div>
+        {% endif %}
+    </div>
 </div>
 </body>
 </html>
