@@ -1,16 +1,14 @@
-# ocrModule.py
+# ocrModule.py  -- FAST + improved confusion handling
 """
-Improved OCR module for ANPR:
-- multiple preprocessing variants (CLAHE, sharpening, bilateral denoise)
-- multiple channel/threshold variants
-- upsizing before OCR
-- uses image_to_data to compute per-attempt median confidence
-- tries multiple --psm modes and aggregates candidates
-- position-aware post-processing using expected masks and a confusion map
-- bounded variant generation to avoid combinatorial explosion
-API:
-    read_plate_text(plate_img: np.ndarray) -> (best_text: str, processed_img: np.ndarray)
+Fast OCR pipeline with improved confusion handling for:
+ - A <-> 4 <-> M
+ - I <-> J <-> 1
+ - 0 <-> O <-> D
+Keeps speed-oriented settings while applying small, prioritized substitutions
+and a cheap state-code repair for the first two characters.
+API: read_plate_text(plate_img: np.ndarray) -> (best_text: str, processed_img: np.ndarray)
 """
+
 import cv2
 import numpy as np
 import pytesseract
@@ -18,34 +16,44 @@ import re
 from itertools import product
 from typing import Tuple, List
 
-# ---------------- CONFIG ----------------
-# Set this path to where your tesseract.exe is installed
+# ---------- CONFIG (fast + tuned) ----------
 TESSERACT_CMD = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
 
-# Whitelist and PSM modes
 WHITELIST = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-PSM_LIST = [7, 8, 6, 11]  # useful page segmentation modes to try
+PSM_LIST = [7, 8]             # single-line, single-word (fast)
+UPSCALE = 1.6                 # smaller upscale for speed
+MAX_VARIANTS = 80
+MAX_COMBINATIONS = 80
 
-# Confusion map (common visual confusions)
+# Confusion map expanded and prioritized
 CONFUSION_MAP = {
+    # digits <-> letters groups we want to handle
     "0": ["O", "D"],
     "O": ["0", "D"],
     "D": ["0", "O"],
-    "1": ["I", "L"],
-    "I": ["1", "L"],
+
+    "1": ["I", "J", "L"],
+    "I": ["1", "J", "L"],
+    "J": ["1", "I"],
     "L": ["1", "I"],
+
+    "4": ["A", "M"],
+    "A": ["4", "M"],
+    "M": ["A", "4"],
+
     "2": ["Z"],
     "Z": ["2"],
+
     "5": ["S"],
     "S": ["5"],
+
     "8": ["B"],
     "B": ["8"],
 }
 
-# Plate patterns and state codes (common Indian codes — extend as needed)
 PLATE_PATTERNS = [
-    re.compile(r"^[A-Z]{2}\d{2}[A-Z]{1,2}\d{4}$"),  # e.g., WB20AB1234
+    re.compile(r"^[A-Z]{2}\d{2}[A-Z]{1,2}\d{4}$"),
     re.compile(r"^[A-Z]{2}\d{2}[A-Z]\d{3}$"),
 ]
 STATE_CODES = {
@@ -53,11 +61,7 @@ STATE_CODES = {
     "LA","LD","MH","ML","MN","MP","MZ","NL","OR","PB","PY","RJ","SK","TG","TN","TR","UP","UT","WB"
 }
 
-# Limits to avoid explosion
-MAX_VARIANTS = 250
-MAX_COMBINATIONS = 200
-
-# ----------------- UTILITIES -----------------
+# ---------- utils ----------
 def _clean_text(s: str) -> str:
     return "".join(ch for ch in (s or "").upper() if ch.isalnum())
 
@@ -66,27 +70,22 @@ def looks_like_plate(s: str) -> bool:
     for p in PLATE_PATTERNS:
         if p.match(s):
             return True
-    # quick heuristic: plausible if starts with state code and contains digits
     if len(s) >= 2 and s[:2] in STATE_CODES and any(ch.isdigit() for ch in s):
         return True
     return False
 
 def expected_mask_for_plate_length(length: int) -> List[str]:
+    # 'A' for alpha, 'D' for digit
     if length == 10:
         return ['A','A','D','D','A','A','D','D','D','D']
     if length == 9:
         return ['A','A','D','D','A','D','D','D','D'][:9]
-    # fallback: first two letters then digits
     return ['A' if i < 2 else 'D' for i in range(length)]
 
 def _levenshtein(a: str, b: str) -> int:
     if a == b:
         return 0
     la, lb = len(a), len(b)
-    if la == 0:
-        return lb
-    if lb == 0:
-        return la
     prev = list(range(lb+1))
     for i in range(1, la+1):
         cur = [i] + [0]*lb
@@ -96,159 +95,80 @@ def _levenshtein(a: str, b: str) -> int:
         prev = cur
     return prev[lb]
 
-# ---------------- PREPROCESSING ----------------
-def _clahe_sharpen(gray: np.ndarray) -> np.ndarray:
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-    c = clahe.apply(gray)
-    b = cv2.bilateralFilter(c, 9, 75, 75)
-    gaussian = cv2.GaussianBlur(b, (0,0), 3)
-    unsharp = cv2.addWeighted(b, 1.6, gaussian, -0.6, 0)
-    return unsharp
-
-def _basic_preprocess(plate_img: np.ndarray) -> np.ndarray:
+# ---------- preprocessing (fast) ----------
+def _basic_gray(plate_img: np.ndarray) -> np.ndarray:
     gray = cv2.cvtColor(plate_img, cv2.COLOR_BGR2GRAY)
-    gray = cv2.bilateralFilter(gray, 11, 17, 17)
+    gray = cv2.bilateralFilter(gray, 7, 50, 50)
     return gray
 
-def _get_variants(plate_img: np.ndarray) -> List[np.ndarray]:
-    """Return grayscale variants to try (unique by simple checksum)."""
-    gray = _basic_preprocess(plate_img)
-    variants = [gray]
+def _clahe(gray: np.ndarray) -> np.ndarray:
     try:
-        variants.append(_clahe_sharpen(gray))
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+        return clahe.apply(gray)
     except Exception:
-        pass
-    try:
-        eq = cv2.equalizeHist(gray)
-        variants.append(eq)
-    except Exception:
-        pass
-    # add color channels (B,G,R)
-    try:
-        b,g,r = cv2.split(plate_img)
-        variants.extend([b,g,r])
-    except Exception:
-        pass
-    # dedupe by sum signature
-    uniq = []
-    seen = set()
-    for v in variants:
-        key = int(v.sum() % (1<<30))
-        if key not in seen:
-            uniq.append(v)
-            seen.add(key)
-    return uniq
+        return gray
 
-def _prepare_for_ocr(img_gray: np.ndarray, upscale: float = 2.5) -> List[np.ndarray]:
-    """Given a gray image, produce thresholded variants suitable for OCR."""
-    outputs = []
-    h, w = img_gray.shape[:2]
+def _prepare_for_ocr_fast(img_gray: np.ndarray, upscale: float = UPSCALE) -> List[np.ndarray]:
+    h,w = img_gray.shape[:2]
     new_w = max(int(w * upscale), w+1)
     new_h = max(int(h * upscale), h+1)
-    big = cv2.resize(img_gray, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-    # Otsu
-    try:
-        _, th_otsu = cv2.threshold(big, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        outputs.append(th_otsu)
-    except Exception:
-        pass
-    # adaptive
-    try:
-        th_adapt = cv2.adaptiveThreshold(big, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                         cv2.THRESH_BINARY, 31, 10)
-        outputs.append(th_adapt)
-    except Exception:
-        pass
-    # ensure dark text on light background
-    final = []
-    for o in outputs:
-        if np.mean(o) < 127:
-            final.append(cv2.bitwise_not(o))
-        else:
-            final.append(o)
-    # morphological closing to connect broken strokes
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3,3))
-    final2 = []
-    for f in final:
-        try:
-            f2 = cv2.morphologyEx(f, cv2.MORPH_CLOSE, kernel, iterations=1)
-            final2.append(f2)
-        except Exception:
-            final2.append(f)
-    return final2 if final2 else [cv2.resize(img_gray, (new_w, new_h), interpolation=cv2.INTER_LINEAR)]
+    small = cv2.resize(img_gray, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+    _, th = cv2.threshold(small, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    if np.mean(th) < 127:
+        th = cv2.bitwise_not(th)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2,2))
+    th2 = cv2.morphologyEx(th, cv2.MORPH_CLOSE, kernel, iterations=1)
+    return [th, th2]
 
-# ---------------- OCR with confidence ----------------
-def ocr_with_confidence(img_bin: np.ndarray, psm: int) -> Tuple[str, float, List[float], str]:
-    """
-    Returns (joined_text, median_confidence, list_of_char_confidences, raw_joined_text)
-    Uses image_to_data to collect per-word confidences and maps them approximately to character-level confidences.
-    """
+# ---------- OCR helper (fast) ----------
+def ocr_with_confidence_fast(img_bin: np.ndarray, psm: int) -> Tuple[str, float]:
     config = f"--oem 3 --psm {psm} -c tessedit_char_whitelist={WHITELIST}"
     try:
         data = pytesseract.image_to_data(img_bin, output_type=pytesseract.Output.DICT, config=config)
+        texts = []
+        confs = []
+        n = len(data.get('text', []))
+        for i in range(n):
+            txt = (data['text'][i] or "").strip()
+            conf_raw = data['conf'][i]
+            try:
+                conf = float(conf_raw)
+            except Exception:
+                conf = -1.0
+            if txt != "" and conf > 0:
+                texts.append(txt)
+                confs.append(conf)
+        if texts:
+            return "".join(texts), float(np.median(np.array(confs))) if confs else 0.0
     except Exception:
-        # fallback
-        raw = pytesseract.image_to_string(img_bin, config=config)
-        return raw.strip(), 0.0, [], raw.strip()
-
-    texts = []
-    confs = []
-    raw_parts = []
-    n = len(data.get('text', []))
-    for i in range(n):
-        txt = (data['text'][i] or "").strip()
-        conf_raw = data['conf'][i]
-        try:
-            conf = float(conf_raw)
-        except Exception:
-            conf = -1.0
-        if txt != "":
-            raw_parts.append(txt)
-            texts.append(txt)
-            if conf > 0:
-                # approx: assign same conf to each char of the word
-                confs.extend([conf] * len(txt))
-    if confs:
-        median_conf = float(np.median(np.array(confs)))
-    else:
-        median_conf = 0.0
-
-    if texts:
-        joined = "".join(texts)
-        raw_joined = " ".join(raw_parts).strip()
-        return joined, median_conf, confs, raw_joined
-
+        pass
     raw = pytesseract.image_to_string(img_bin, config=config)
-    return raw.strip(), 0.0, [], raw.strip()
+    return raw.strip(), 0.0
 
-# ---------------- Variant generation (position-aware) ----------------
-def generate_variants_from_string(s: str, max_combinations: int = MAX_COMBINATIONS) -> List[str]:
-    """
-    Generate position-aware variants using CONFUSION_MAP but filtered by expected A/D mask.
-    Caps total combinations.
-    """
+# ---------- small variant generation (position-aware, prioritized) ----------
+def generate_variants_from_string_fast(s: str, max_combinations: int = MAX_COMBINATIONS) -> List[str]:
     s = (s or "").upper()
     mask = expected_mask_for_plate_length(len(s))
     opts = []
     for i, ch in enumerate(s):
         choices = [ch]
         if ch in CONFUSION_MAP:
-            alts = CONFUSION_MAP[ch]
+            # prioritize alternatives that match expected type
             expected = mask[i] if i < len(mask) else None
-            filtered = []
+            preferred = []
             fallback = []
-            for a in alts:
-                if expected == 'D' and a.isdigit():
-                    filtered.append(a)
-                elif expected == 'A' and a.isalpha():
-                    filtered.append(a)
+            for alt in CONFUSION_MAP[ch]:
+                if expected == 'D' and alt.isdigit():
+                    preferred.append(alt)
+                elif expected == 'A' and alt.isalpha():
+                    preferred.append(alt)
                 else:
-                    fallback.append(a)
-            for c in filtered + fallback:
+                    fallback.append(alt)
+            # place preferred first then fallback
+            for c in preferred + fallback:
                 if c not in choices:
                     choices.append(c)
-        opts.append(choices)
-
+        opts.append(list(dict.fromkeys(choices)))
     variants = []
     for prod in product(*opts):
         variants.append("".join(prod))
@@ -256,16 +176,16 @@ def generate_variants_from_string(s: str, max_combinations: int = MAX_COMBINATIO
             break
     return variants
 
-# ---------------- Scoring and selection ----------------
-def pick_best_by_mask(candidates: List[str]) -> str:
+def pick_best_by_mask_fast(candidates: List[str]) -> str:
     if not candidates:
         return ""
-    # 1) exact pattern match
+    # prefer exact pattern
     for c in candidates:
         if looks_like_plate(c):
             return c
-    # 2) mask-based scoring with state bonus and small length bonus
-    scored = []
+    # simple mask scoring + state bonus
+    best = None
+    best_score = -1e9
     for c in candidates:
         score = 0.0
         mask = expected_mask_for_plate_length(len(c))
@@ -275,98 +195,116 @@ def pick_best_by_mask(candidates: List[str]) -> str:
                 score += 2.0
             elif expected == 'D' and ch.isdigit():
                 score += 2.0
-            elif ch.isalnum():
-                score += 0.2
-            else:
-                score -= 0.5
         if len(c) >= 2 and c[:2] in STATE_CODES:
             score += 1.5
         score += 0.01 * len(c)
-        scored.append((score, c))
-    scored.sort(reverse=True)
-    best_score, best_candidate = scored[0]
-    # tie-break among top 3 using edit distance to mask-template
-    def mask_to_template(mask):
-        return "".join('A' if x == 'A' else '0' for x in mask)
-    template = mask_to_template(expected_mask_for_plate_length(len(best_candidate)))
-    top_k = [c for _, c in scored[:3]]
-    best = best_candidate
-    best_dist = _levenshtein(best, template)
-    for cand in top_k:
-        d = _levenshtein(cand, template)
-        if d < best_dist:
-            best = cand
-            best_dist = d
-    return best
+        if score > best_score:
+            best_score = score
+            best = c
+    return best or (candidates[0] if candidates else "")
 
-# ----------------- MAIN FUNCTION -----------------
+# ---------- cheap state-code repair ----------
+def repair_state_code_prefix(candidate: str) -> str:
+    """
+    If the first two chars are not a known state code, try small substitutions
+    for the first two chars using the confusion map to see if a valid state code appears.
+    Returns either repaired candidate or original if no repair found.
+    """
+    if not candidate or len(candidate) < 2:
+        return candidate
+    prefix = candidate[:2].upper()
+    if prefix in STATE_CODES:
+        return candidate
+    # build small set of variants modifying only first 2 chars
+    first_opts = [prefix[0]] + (CONFUSION_MAP.get(prefix[0], []) if prefix[0] in CONFUSION_MAP else [])
+    second_opts = [prefix[1]] + (CONFUSION_MAP.get(prefix[1], []) if prefix[1] in CONFUSION_MAP else [])
+    tried = []
+    for a in first_opts:
+        for b in second_opts:
+            code = (a + b).upper()
+            if code in STATE_CODES:
+                # replace prefix
+                repaired = code + candidate[2:]
+                return repaired
+            tried.append(code)
+    return candidate
+
+# ---------- MAIN fast read_plate_text ----------
 def read_plate_text(plate_img: np.ndarray) -> Tuple[str, np.ndarray]:
     """
-    Input: cropped BGR plate image
-    Output: (best_text, processed_image_used_for_best)
+    Fast OCR pipeline: return (best_text, processed_image)
     """
-    attempts = []  # tuples (cleaned_text, median_conf, proc_image)
+    # quick resize: keep width reasonable
+    h,w = plate_img.shape[:2]
+    if w > 800:
+        scale = 800.0 / w
+        plate_img = cv2.resize(plate_img, (int(w*scale), int(h*scale)), interpolation=cv2.INTER_AREA)
 
-    gray_variants = _get_variants(plate_img)
-    for gray in gray_variants:
-        thresh_variants = _prepare_for_ocr(gray)
-        for proc in thresh_variants:
+    gray = _basic_gray(plate_img)
+    variants = [gray, _clahe(gray)]
+
+    attempts = []  # (text, conf, proc)
+    for var in variants:
+        thresh_list = _prepare_for_ocr_fast(var, upscale=UPSCALE)
+        for proc in thresh_list:
             for psm in PSM_LIST:
-                raw_text, median_conf, char_confs, raw_joined = ocr_with_confidence(proc, psm)
-                cleaned = _clean_text(raw_text)
+                text, conf = ocr_with_confidence_fast(proc, psm)
+                cleaned = _clean_text(text)
                 if cleaned:
-                    attempts.append((cleaned, float(median_conf), proc.copy()))
+                    attempts.append((cleaned, conf, proc.copy()))
 
     if not attempts:
-        # fallback: return empty and first processed variant for display
-        fallback_proc = _prepare_for_ocr(_basic_preprocess(plate_img))[0]
-        return "", fallback_proc
+        proc = _prepare_for_ocr_fast(gray, upscale=UPSCALE)[0]
+        return "", proc
 
-    # aggregate per unique candidate
+    # aggregate by text
     agg = {}
-    for text, conf, img in attempts:
-        if text not in agg:
-            agg[text] = {"confs": [], "img": img}
-        agg[text]["confs"].append(conf)
+    for txt, conf, img in attempts:
+        if txt not in agg:
+            agg[txt] = {"confs": [], "img": img}
+        agg[txt]["confs"].append(conf)
 
-    scored_candidates = []
-    for text, info in agg.items():
-        conf_med = float(np.median(np.array(info["confs"]))) if info["confs"] else 0.0
-        pattern_bonus = 2.0 if looks_like_plate(text) else 0.0
-        state_bonus = 1.0 if len(text) >= 2 and text[:2] in STATE_CODES else 0.0
-        len_bonus = 0.01 * len(text)
-        score = conf_med + pattern_bonus + state_bonus + len_bonus
-        scored_candidates.append((score, text, info["img"], conf_med))
+    scored = []
+    for txt, info in agg.items():
+        median_conf = float(np.median(np.array(info["confs"]))) if info["confs"] else 0.0
+        bonus = 1.5 if looks_like_plate(txt) else 0.0
+        if len(txt) >= 2 and txt[:2] in STATE_CODES:
+            bonus += 0.5
+        score = median_conf + bonus + 0.01 * len(txt)
+        scored.append((score, txt, info["img"], median_conf))
 
-    scored_candidates.sort(reverse=True, key=lambda x: (x[0], x[3]))
+    scored.sort(reverse=True, key=lambda x: (x[0], x[3]))
+    top_texts = [t for _, t, _, _ in scored[:5]]
 
-    # collect top N texts for mask-guided refinement
-    top_texts = [t for _, t, _, _ in scored_candidates[:8]]
+    # quick state-code repair on top candidate(s)
+    final_choice = None
+    for score, txt, img, conf in scored:
+        # try repairing prefix if needed
+        repaired = repair_state_code_prefix(txt)
+        if repaired != txt and looks_like_plate(repaired):
+            return repaired, img
+        if looks_like_plate(txt):
+            return txt, img
+    # expand small variants from top_texts
+    pool = set(top_texts)
+    for t in top_texts:
+        for v in generate_variants_from_string_fast(t, max_combinations=MAX_VARIANTS):
+            pool.add(v)
 
-    # if any top text already looks like a plate, pick the highest-scoring such text
-    for score, text, img, conf in scored_candidates:
-        if looks_like_plate(text):
-            return text, img
+    chosen = pick_best_by_mask_fast(list(pool))
 
-    # expand using position-aware variants from top_texts but bounded
-    candidate_pool = set(top_texts)
-    for txt in top_texts:
-        for v in generate_variants_from_string(txt, max_combinations=MAX_VARIANTS):
-            candidate_pool.add(v)
-
-    # final choice using mask/pattern guidance
-    chosen = pick_best_by_mask(list(candidate_pool))
-
-    # if still nothing, fallback to highest-scored candidate
     if not chosen:
-        chosen = scored_candidates[0][1]
-        proc_img = scored_candidates[0][2]
-        return chosen, proc_img
+        chosen = scored[0][1]
+        return chosen, scored[0][2]
 
-    # find a processed image associated with chosen (best conf if exist)
-    for score, text, img, conf in scored_candidates:
-        if text == chosen:
+    # final: if chosen prefix wrong try repair
+    final_repaired = repair_state_code_prefix(chosen)
+    if final_repaired != chosen and looks_like_plate(final_repaired):
+        # use processed image of top candidate (best fallback)
+        return final_repaired, scored[0][2]
+
+    # return processed image associated with chosen if available
+    for score, t, img, conf in scored:
+        if t == chosen:
             return chosen, img
-
-    # fallback to top attempt processed image
-    return chosen, scored_candidates[0][2]
+    return chosen, scored[0][2]
