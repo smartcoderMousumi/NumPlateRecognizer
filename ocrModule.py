@@ -308,3 +308,5 @@ def read_plate_text(plate_img: np.ndarray) -> Tuple[str, np.ndarray]:
         if t == chosen:
             return chosen, img
     return chosen, scored[0][2]
+
+ hello popy mami 
